@@ -229,6 +229,7 @@ def get_space_distribution(db_path):
     Returns size totals for Unique, Keeper, and Wasted duplicate spaces.
     """
     db_conn = sqlite3.connect(db_path)
+    init_db(db_conn)
     cursor = db_conn.cursor()
     
     cursor.execute("SELECT COUNT(*), SUM(size) FROM files")
@@ -721,10 +722,25 @@ def launch_gui():
 
             self.logs_visible = False
 
+            self.scan_path.trace_add('write', self.on_scan_path_changed)
+
             self.build_ui()
             self.poll_queue()
             self.draw_empty_chart()
             self.update_ram_usage()
+            self.load_path_data()
+
+        def on_scan_path_changed(self, *args):
+            self.load_path_data()
+
+        def load_path_data(self):
+            path_str = self.scan_path.get().strip()
+            if path_str:
+                try:
+                    db_path = get_db_path(path_str)
+                    self.update_metrics(db_path)
+                except Exception:
+                    pass
 
         def make_button(self, parent, text, command, bg_color=THEME['btn_bg'], fg_color=THEME['fg']):
             btn = tk.Button(
@@ -1054,7 +1070,9 @@ def launch_gui():
             start_ang = 0
             for ang, col in zip(angles, colors):
                 if ang > 0:
-                    self.chart_canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=start_ang, extent=ang, fill=col, outline="")
+                    # Tkinter create_arc glithes if extent is 360; cap single full slice at 359.99
+                    draw_extent = min(ang, 359.99)
+                    self.chart_canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=start_ang, extent=draw_extent, fill=col, outline="")
                     start_ang += ang
             
             r_inner = 48
@@ -1164,17 +1182,15 @@ def launch_gui():
             return cb
 
         def update_metrics(self, db_path):
-            try:
-                stats = get_space_distribution(db_path)
-                self.stat_scanned_files.set(f"{stats['total_count']:,}")
-                self.stat_scanned_size.set(format_size(stats['total_size']))
-                self.stat_duplicates.set(f"{stats['wasted_count']:,} copies")
-                self.stat_wasted.set(format_size(stats['wasted_size']))
-                
-                # Update chart
-                self.update_donut_chart(stats['unique_size'], stats['keeper_size'], stats['wasted_size'])
-            except Exception as e:
-                self.queue.put(('log', f"Error loading database statistics: {e}\n", 'error'))
+            def calc_and_queue():
+                try:
+                    stats = get_space_distribution(db_path)
+                    self.queue.put(('metrics', stats))
+                except Exception as e:
+                    self.queue.put(('log', f"Error loading database statistics: {e}\n", 'error'))
+
+            # Run DB stats calculation in a separate thread if called during execution or main loop
+            threading.Thread(target=calc_and_queue, daemon=True).start()
 
         def start_scan(self):
             scan_dir = self.scan_path.get().strip()
@@ -1362,6 +1378,13 @@ def launch_gui():
                         self.enable_widgets()
                     elif cmd == 'disable_controls':
                         self.disable_widgets()
+                    elif cmd == 'metrics':
+                        stats = msg[1]
+                        self.stat_scanned_files.set(f"{stats['total_count']:,}")
+                        self.stat_scanned_size.set(format_size(stats['total_size']))
+                        self.stat_duplicates.set(f"{stats['wasted_count']:,} copies")
+                        self.stat_wasted.set(format_size(stats['wasted_size']))
+                        self.update_donut_chart(stats['unique_size'], stats['keeper_size'], stats['wasted_size'])
                         
                     self.queue.task_done()
             except queue.Empty:
