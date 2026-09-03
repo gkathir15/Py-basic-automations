@@ -710,6 +710,131 @@ def launch_gui():
         'font_code': ('Consolas', 10)
     }
 
+    class HistoricSpeedChart(tk.Frame):
+        """
+        Pure Tkinter historic session speed & performance chart.
+        Plots Disk Read / Hashing Speed (MB/s), Processing Speed (files/s), and Process RAM (MB)
+        on a single time-series canvas graph.
+        """
+        def __init__(self, parent, bg_color, theme):
+            super().__init__(parent, bg=bg_color)
+            self.theme = theme
+
+            self.series = {
+                'read_hash_mbs': {'label': 'Disk Read / Hash Speed (MB/s)', 'color': '#89b4fa', 'data': []},
+                'file_proc_fps': {'label': 'File Processing (files/s)', 'color': '#a6e3a1', 'data': []},
+                'ram_mb': {'label': 'Process RAM (MB)', 'color': '#fab387', 'data': []}
+            }
+            self.time_points = []
+            self.start_time = time.time()
+
+            # Chart header with title and legends
+            header_frame = tk.Frame(self, bg=bg_color)
+            header_frame.pack(fill='x', pady=(0, 4))
+
+            title_lbl = tk.Label(header_frame, text="Historic Session Performance", font=self.theme['font_header'], bg=bg_color, fg=self.theme['fg'])
+            title_lbl.pack(side='left')
+
+            # Legends
+            legend_frame = tk.Frame(header_frame, bg=bg_color)
+            legend_frame.pack(side='right')
+
+            for key, sinfo in self.series.items():
+                item = tk.Frame(legend_frame, bg=bg_color)
+                item.pack(side='left', padx=(8, 0))
+                box = tk.Label(item, bg=sinfo['color'], width=2, height=1, relief='flat')
+                box.pack(side='left', padx=(0, 3))
+                lbl = tk.Label(item, text=sinfo['label'], font=('Segoe UI', 8), bg=bg_color, fg=self.theme['fg_dim'])
+                lbl.pack(side='left')
+
+            # Main canvas graph
+            self.canvas = tk.Canvas(self, height=140, bg=self.theme['card_bg'], highlightthickness=1, highlightbackground=self.theme['btn_bg'])
+            self.canvas.pack(fill='both', expand=True)
+            self.canvas.bind("<Configure>", lambda e: self.redraw())
+
+        def reset(self):
+            self.time_points.clear()
+            for sinfo in self.series.values():
+                sinfo['data'].clear()
+            self.start_time = time.time()
+            self.redraw()
+
+        def add_sample(self, elapsed=None, read_hash_mbs=0.0, file_proc_fps=0.0, ram_mb=0.0):
+            if elapsed is None:
+                elapsed = time.time() - self.start_time
+
+            # Keep last 120 data points
+            if len(self.time_points) >= 120:
+                self.time_points.pop(0)
+                for sinfo in self.series.values():
+                    sinfo['data'].pop(0)
+
+            self.time_points.append(elapsed)
+            self.series['read_hash_mbs']['data'].append(max(0.0, float(read_hash_mbs)))
+            self.series['file_proc_fps']['data'].append(max(0.0, float(file_proc_fps)))
+            self.series['ram_mb']['data'].append(max(0.0, float(ram_mb)))
+
+            self.redraw()
+
+        def redraw(self):
+            self.canvas.delete("all")
+            width = self.canvas.winfo_width() or 400
+            height = self.canvas.winfo_height() or 140
+
+            padding_left = 45
+            padding_right = 15
+            padding_top = 15
+            padding_bottom = 25
+
+            plot_w = max(10, width - padding_left - padding_right)
+            plot_h = max(10, height - padding_top - padding_bottom)
+
+            # Draw background grid lines
+            for i in range(4):
+                y = padding_top + (plot_h * i / 3.0)
+                self.canvas.create_line(padding_left, y, padding_left + plot_w, y, fill='#313244', dash=(2, 2))
+
+            if not self.time_points or len(self.time_points) < 2:
+                self.canvas.create_text(width / 2, height / 2, text="Waiting for session metrics...", fill=self.theme['fg_dim'], font=('Segoe UI', 9))
+                return
+
+            t_min = self.time_points[0]
+            t_max = max(self.time_points[-1], t_min + 1.0)
+
+            # Calculate dynamic Y max across series
+            max_val = 1.0
+            for sinfo in self.series.values():
+                if sinfo['data']:
+                    max_val = max(max_val, max(sinfo['data']))
+
+            max_val = max_val * 1.15  # headroom
+
+            # Y axis labels
+            self.canvas.create_text(padding_left - 5, padding_top, text=f"{max_val:.1f}", fill=self.theme['fg_dim'], font=('Segoe UI', 7), anchor='e')
+            self.canvas.create_text(padding_left - 5, padding_top + plot_h / 2, text=f"{max_val/2:.1f}", fill=self.theme['fg_dim'], font=('Segoe UI', 7), anchor='e')
+            self.canvas.create_text(padding_left - 5, padding_top + plot_h, text="0.0", fill=self.theme['fg_dim'], font=('Segoe UI', 7), anchor='e')
+
+            # X axis labels
+            self.canvas.create_text(padding_left, padding_top + plot_h + 12, text=f"{t_min:.0f}s", fill=self.theme['fg_dim'], font=('Segoe UI', 7), anchor='n')
+            self.canvas.create_text(padding_left + plot_w, padding_top + plot_h + 12, text=f"{t_max:.0f}s", fill=self.theme['fg_dim'], font=('Segoe UI', 7), anchor='n')
+
+            # Draw lines for each series
+            n = len(self.time_points)
+            for key, sinfo in self.series.items():
+                data = sinfo['data']
+                points = []
+                for idx in range(n):
+                    t = self.time_points[idx]
+                    v = data[idx]
+
+                    x = padding_left + ((t - t_min) / (t_max - t_min)) * plot_w
+                    y = padding_top + plot_h - ((v / max_val) * plot_h)
+                    points.append((x, y))
+
+                if len(points) >= 2:
+                    flat_coords = [c for pt in points for c in pt]
+                    self.canvas.create_line(flat_coords, fill=sinfo['color'], width=2, smooth=True)
+
     class DuplicateFinderApp:
         def __init__(self, root):
             self.root = root
@@ -754,6 +879,9 @@ def launch_gui():
             self.logs_visible = False
 
             self.scan_path.trace_add('write', self.on_scan_path_changed)
+
+            self.current_read_hash_mbs = 0.0
+            self.current_file_proc_fps = 0.0
 
             self.build_ui()
             self.poll_queue()
@@ -909,6 +1037,10 @@ def launch_gui():
             metrics_grid.columnconfigure(1, weight=1)
             metrics_grid.rowconfigure(0, weight=1)
             metrics_grid.rowconfigure(1, weight=1)
+
+            # Historic Speed & Performance Chart Frame
+            self.historic_chart = HistoricSpeedChart(container, THEME['bg'], THEME)
+            self.historic_chart.pack(fill='x', pady=(0, 10))
 
             # 4. Actions & Progress Frame
             actions_and_progress = tk.Frame(container, bg=THEME['bg'])
@@ -1117,7 +1249,16 @@ def launch_gui():
 
         def update_ram_usage(self):
             ram_bytes = get_current_memory_usage()
+            ram_mb = ram_bytes / (1024 * 1024)
             self.perf_ram.set(format_size(ram_bytes))
+
+            # Push sample to historic speed chart
+            self.historic_chart.add_sample(
+                read_hash_mbs=self.current_read_hash_mbs,
+                file_proc_fps=self.current_file_proc_fps,
+                ram_mb=ram_mb
+            )
+
             self.root.after(1500, self.update_ram_usage)
 
         def get_progress_cb(self):
@@ -1244,6 +1385,10 @@ def launch_gui():
                 messagebox.showerror("Error", "Please select a folder to scan.")
                 return
                 
+            self.historic_chart.reset()
+            self.current_read_hash_mbs = 0.0
+            self.current_file_proc_fps = 0.0
+
             self.queue.put(('clear_log',))
             self.queue.put(('disable_controls',))
             self.queue.put(('status', "Starting scan..."))
@@ -1402,11 +1547,13 @@ def launch_gui():
                         self.progress_bar['value'] = msg[1]
                     elif cmd == 'perf_scan':
                         speed, elapsed = msg[1], msg[2]
+                        self.current_file_proc_fps = speed
                         self.perf_speed.set(f"{speed:.0f} files/s")
                         self.perf_elapsed.set(f"{elapsed:.1f}s")
                         self.perf_eta.set("Scanning...")
                     elif cmd == 'perf_hash':
                         speed, elapsed, eta = msg[1], msg[2], msg[3]
+                        self.current_read_hash_mbs = speed / (1024 * 1024)
                         self.perf_speed.set(f"{format_size(speed)}/s")
                         self.perf_elapsed.set(f"{elapsed:.1f}s")
                         self.perf_eta.set(format_time(eta))
