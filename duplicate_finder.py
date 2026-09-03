@@ -9,6 +9,7 @@ import shutil
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
@@ -372,7 +373,10 @@ def find_duplicates(db_path, progress_cb=None, run_quiet=False, throttle_sleep=0
     
     init_db(db_conn)
     
-    # Step 1: Compute partial hashes for files with matching sizes
+    # Determine worker threads count
+    max_workers = min(32, (os.cpu_count() or 4) + 4)
+
+    # Step 1: Compute partial hashes for files with matching sizes using thread pool
     cursor.execute("""
         SELECT filepath FROM files 
         WHERE size IN (
@@ -387,22 +391,41 @@ def find_duplicates(db_path, progress_cb=None, run_quiet=False, throttle_sleep=0
         if progress_cb:
             progress_cb('partial_start', len(to_partial))
         elif not run_quiet:
-            print(f"{Colors.BLUE}Computing partial hashes for {len(to_partial):,} size-matching files...{Colors.END}")
-        for idx, path in enumerate(to_partial):
+            print(f"{Colors.BLUE}Computing partial hashes for {len(to_partial):,} size-matching files (using {max_workers} threads)...{Colors.END}")
+
+        batch_updates = []
+        db_lock = threading.Lock()
+        completed_count = 0
+
+        def process_partial(path):
             p_hash = compute_partial_hash(path)
             if p_hash is None:
                 p_hash = f"ERROR_{uuid.uuid4().hex}"
-            db_conn.execute("UPDATE files SET partial_hash = ? WHERE filepath = ?", (p_hash, path))
-            if idx % 100 == 0 or idx == len(to_partial) - 1:
-                db_conn.commit()
-                if progress_cb:
-                    progress_cb('partial_progress', idx + 1, len(to_partial))
-                elif not run_quiet:
-                    print_progress(idx + 1, len(to_partial), prefix="Partial Hashing", suffix=f"{idx+1}/{len(to_partial)}")
+            return path, p_hash
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(process_partial, path) for path in to_partial]
+            for future in as_completed(futures):
+                path, p_hash = future.result()
+                batch_updates.append((p_hash, path))
+                completed_count += 1
+
+                if len(batch_updates) >= 100 or completed_count == len(to_partial):
+                    with db_lock:
+                        db_conn.executemany("UPDATE files SET partial_hash = ? WHERE filepath = ?", batch_updates)
+                        db_conn.commit()
+                    batch_updates.clear()
+
+                if completed_count % 10 == 0 or completed_count == len(to_partial):
+                    if progress_cb:
+                        progress_cb('partial_progress', completed_count, len(to_partial))
+                    elif not run_quiet:
+                        print_progress(completed_count, len(to_partial), prefix="Partial Hashing", suffix=f"{completed_count}/{len(to_partial)}")
+
         if not run_quiet and not progress_cb:
             print()
     
-    # Step 2: Compute full hashes for duplicates
+    # Step 2: Compute full hashes for duplicates using thread pool
     cursor.execute("""
         SELECT filepath, size FROM files 
         WHERE (size, partial_hash) IN (
@@ -420,23 +443,40 @@ def find_duplicates(db_path, progress_cb=None, run_quiet=False, throttle_sleep=0
         if progress_cb:
             progress_cb('full_start', len(to_full), total_bytes_to_hash)
         elif not run_quiet:
-            print(f"{Colors.BLUE}Computing full hashes for {len(to_full):,} candidate files ({format_size(total_bytes_to_hash)})...{Colors.END}")
+            print(f"{Colors.BLUE}Computing full hashes for {len(to_full):,} candidate files ({format_size(total_bytes_to_hash)}) using {max_workers} threads...{Colors.END}")
             
-        for idx, path in enumerate(to_full):
-            # Pass chunk handler to progress callback
-            def make_chunk_cb():
-                return lambda sz: progress_cb('hash_chunk', sz) if progress_cb else None
-                
-            f_hash = compute_full_hash(path, chunk_cb=make_chunk_cb(), throttle_sleep=throttle_sleep)
+        batch_updates = []
+        db_lock = threading.Lock()
+        completed_count = 0
+
+        def process_full(path):
+            def chunk_cb(sz):
+                if progress_cb:
+                    progress_cb('hash_chunk', sz)
+            f_hash = compute_full_hash(path, chunk_cb=chunk_cb, throttle_sleep=throttle_sleep)
             if f_hash is None:
                 f_hash = f"ERROR_{uuid.uuid4().hex}"
-            db_conn.execute("UPDATE files SET full_hash = ? WHERE filepath = ?", (f_hash, path))
-            if idx % 10 == 0 or idx == len(to_full) - 1:
-                db_conn.commit()
-                if progress_cb:
-                    progress_cb('full_progress', idx + 1, len(to_full))
-                elif not run_quiet:
-                    print_progress(idx + 1, len(to_full), prefix="Full Hashing   ", suffix=f"{idx+1}/{len(to_full)}")
+            return path, f_hash
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(process_full, path) for path in to_full]
+            for future in as_completed(futures):
+                path, f_hash = future.result()
+                batch_updates.append((f_hash, path))
+                completed_count += 1
+
+                if len(batch_updates) >= 10 or completed_count == len(to_full):
+                    with db_lock:
+                        db_conn.executemany("UPDATE files SET full_hash = ? WHERE filepath = ?", batch_updates)
+                        db_conn.commit()
+                    batch_updates.clear()
+
+                if completed_count % 5 == 0 or completed_count == len(to_full):
+                    if progress_cb:
+                        progress_cb('full_progress', completed_count, len(to_full))
+                    elif not run_quiet:
+                        print_progress(completed_count, len(to_full), prefix="Full Hashing   ", suffix=f"{completed_count}/{len(to_full)}")
+
         if not run_quiet and not progress_cb:
             print()
         db_conn.commit()
@@ -719,6 +759,8 @@ def launch_gui():
             self.hash_start_time = 0
             self.hash_total_bytes = 0
             self.hash_bytes_processed = 0
+            self.last_ui_update_time = 0
+            self.progress_lock = threading.Lock()
 
             self.logs_visible = False
 
@@ -1121,15 +1163,20 @@ def launch_gui():
                     self.queue.put(('progress', 0))
                 elif action == 'hash_chunk':
                     chunk_sz = args[0]
-                    self.hash_bytes_processed += chunk_sz
-                    elapsed = time.time() - self.hash_start_time
-                    speed = self.hash_bytes_processed / elapsed if elapsed > 0 else 0
-                    eta = (self.hash_total_bytes - self.hash_bytes_processed) / speed if speed > 0 else 0
-                    percent = int(100 * self.hash_bytes_processed / self.hash_total_bytes) if self.hash_total_bytes > 0 else 0
-                    
-                    self.queue.put(('progress', percent))
-                    self.queue.put(('status', f"Full Hashing: {percent}%"))
-                    self.queue.put(('perf_hash', speed, elapsed, eta))
+                    with self.progress_lock:
+                        self.hash_bytes_processed += chunk_sz
+                        now = time.time()
+                        # Throttle GUI queue updates to max 10 times per second to prevent event loop jank
+                        if now - self.last_ui_update_time >= 0.1 or self.hash_bytes_processed >= self.hash_total_bytes:
+                            self.last_ui_update_time = now
+                            elapsed = now - self.hash_start_time
+                            speed = self.hash_bytes_processed / elapsed if elapsed > 0 else 0
+                            eta = (self.hash_total_bytes - self.hash_bytes_processed) / speed if speed > 0 else 0
+                            percent = int(100 * self.hash_bytes_processed / self.hash_total_bytes) if self.hash_total_bytes > 0 else 0
+
+                            self.queue.put(('progress', percent))
+                            self.queue.put(('status', f"Full Hashing: {percent}%"))
+                            self.queue.put(('perf_hash', speed, elapsed, eta))
                 elif action == 'full_progress':
                     curr, total = args
                     pass
