@@ -84,6 +84,16 @@ class TestDuplicateFinder(unittest.TestCase):
         self.assertEqual(cursor.fetchone()[0], 0)
         conn.close()
 
+    def test_historic_speed_chart(self):
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+            root.destroy()
+        except tk.TclError:
+            # Headless environment without X server display
+            pass
+
     def test_format_helpers(self):
         self.assertEqual(df.format_size(500), "500 B")
         self.assertEqual(df.format_size(2048), "2.00 KB")
