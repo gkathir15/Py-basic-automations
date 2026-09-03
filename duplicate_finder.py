@@ -690,18 +690,18 @@ def launch_gui():
         print("Please run this tool in CLI mode by adding arguments.")
         sys.exit(1)
 
-    # Theme colors definition (Catppuccin Mocha dashboard aesthetic)
+    # Theme colors definition (Soft pastel dashboard aesthetic)
     THEME = {
-        'bg': '#1e1e2e',
-        'card_bg': '#252538',
-        'btn_bg': '#313244',
-        'btn_blue': '#89b4fa',
-        'btn_green': '#a6e3a1',
-        'btn_orange': '#fab387',
-        'btn_red': '#f38ba8',
-        'fg': '#cdd6f4',
-        'fg_dim': '#bac2de',
-        'fg_dark': '#11111b',
+        'bg': '#f2f4f8',
+        'card_bg': '#ffffff',
+        'btn_bg': '#e2e8f0',
+        'btn_blue': '#7ba0e4',
+        'btn_green': '#7fc99a',
+        'btn_orange': '#e89b6b',
+        'btn_red': '#e57373',
+        'fg': '#2d3748',
+        'fg_dim': '#64748b',
+        'fg_dark': '#1a202c',
         'font_title': ('Segoe UI', 18, 'bold'),
         'font_header': ('Segoe UI', 11, 'bold'),
         'font_card_val': ('Segoe UI', 14, 'bold'),
@@ -721,9 +721,9 @@ def launch_gui():
             self.theme = theme
 
             self.series = {
-                'read_hash_mbs': {'label': 'Disk Read / Hash Speed (MB/s)', 'color': '#89b4fa', 'data': []},
-                'file_proc_fps': {'label': 'File Processing (files/s)', 'color': '#a6e3a1', 'data': []},
-                'ram_mb': {'label': 'Process RAM (MB)', 'color': '#fab387', 'data': []}
+                'read_hash_mbs': {'label': 'Disk Read / Hash Speed (MB/s)', 'color': '#7ba0e4', 'data': []},
+                'file_proc_fps': {'label': 'File Processing (files/s)', 'color': '#7fc99a', 'data': []},
+                'ram_mb': {'label': 'Process RAM (MB)', 'color': '#e89b6b', 'data': []}
             }
             self.time_points = []
             self.start_time = time.time()
@@ -792,7 +792,7 @@ def launch_gui():
             # Draw background grid lines
             for i in range(4):
                 y = padding_top + (plot_h * i / 3.0)
-                self.canvas.create_line(padding_left, y, padding_left + plot_w, y, fill='#313244', dash=(2, 2))
+                self.canvas.create_line(padding_left, y, padding_left + plot_w, y, fill='#e2e8f0', dash=(2, 2))
 
             if not self.time_points or len(self.time_points) < 2:
                 self.canvas.create_text(width / 2, height / 2, text="Waiting for session metrics...", fill=self.theme['fg_dim'], font=('Segoe UI', 9))
@@ -984,9 +984,9 @@ def launch_gui():
             # Mini Legend
             legend_frame = tk.Frame(chart_card, bg=THEME['card_bg'])
             legend_frame.pack(fill='x', pady=(2, 0))
-            self.draw_legend_box(legend_frame, '#89b4fa', "Unique").pack(side='left', expand=True)
-            self.draw_legend_box(legend_frame, '#a6e3a1', "Keeper").pack(side='left', expand=True)
-            self.draw_legend_box(legend_frame, '#fab387', "Wasted").pack(side='left', expand=True)
+            self.draw_legend_box(legend_frame, THEME['btn_blue'], "Unique").pack(side='left', expand=True)
+            self.draw_legend_box(legend_frame, THEME['btn_green'], "Keeper").pack(side='left', expand=True)
+            self.draw_legend_box(legend_frame, THEME['btn_orange'], "Wasted").pack(side='left', expand=True)
 
             # Right side: Metric cards grid
             metrics_grid = tk.Frame(self.dashboard_pane, bg=THEME['bg'])
@@ -1205,7 +1205,7 @@ def launch_gui():
             self.chart_canvas.delete("all")
             cx, cy = 85, 85
             r = 75
-            self.chart_canvas.create_oval(cx-r, cy-r, cx+r, cy+r, fill='#313244', outline="")
+            self.chart_canvas.create_oval(cx-r, cy-r, cx+r, cy+r, fill=THEME['btn_bg'], outline="")
             
             r_inner = 48
             self.chart_canvas.create_oval(cx-r_inner, cy-r_inner, cx+r_inner, cy+r_inner, fill=THEME['card_bg'], outline="")
@@ -1228,7 +1228,7 @@ def launch_gui():
                 360 * (wasted / total)
             ]
             
-            colors = ['#89b4fa', '#a6e3a1', '#fab387']
+            colors = [THEME['btn_blue'], THEME['btn_green'], THEME['btn_orange']]
             
             start_ang = 0
             for ang, col in zip(angles, colors):
@@ -1244,7 +1244,7 @@ def launch_gui():
             self.chart_canvas.create_oval(cx-r_inner, cy-r_inner, cx+r_inner, cy+r_inner, fill=THEME['card_bg'], outline="")
             
             wasted_pct = int(100 * wasted / total) if total > 0 else 0
-            self.chart_canvas.create_text(cx, cy - 6, text=f"{wasted_pct}%", font=('Segoe UI', 14, 'bold'), fill='#fab387')
+            self.chart_canvas.create_text(cx, cy - 6, text=f"{wasted_pct}%", font=('Segoe UI', 14, 'bold'), fill=THEME['btn_orange'])
             self.chart_canvas.create_text(cx, cy + 12, text="Wasted", font=('Segoe UI', 8), fill=THEME['fg_dim'])
 
         def update_ram_usage(self):
