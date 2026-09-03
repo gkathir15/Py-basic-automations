@@ -9,6 +9,7 @@ import shutil
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
@@ -228,7 +229,8 @@ def get_space_distribution(db_path):
     Analyzes file sizes and grouping in SQLite.
     Returns size totals for Unique, Keeper, and Wasted duplicate spaces.
     """
-    db_conn = sqlite3.connect(db_path)
+    db_conn = sqlite3.connect(db_path, timeout=10.0)
+    db_conn.execute("PRAGMA journal_mode=WAL;")
     init_db(db_conn)
     cursor = db_conn.cursor()
     
@@ -383,25 +385,43 @@ def find_duplicates(db_path, progress_cb=None, run_quiet=False, throttle_sleep=0
     """)
     to_partial = [r[0] for r in cursor.fetchall()]
     
+    max_workers = min(32, (os.cpu_count() or 4) * 2)
+
     if to_partial:
         if progress_cb:
             progress_cb('partial_start', len(to_partial))
         elif not run_quiet:
             print(f"{Colors.BLUE}Computing partial hashes for {len(to_partial):,} size-matching files...{Colors.END}")
-        for idx, path in enumerate(to_partial):
+
+        completed_count = 0
+        batch_updates = []
+
+        def _partial_task(path):
             p_hash = compute_partial_hash(path)
             if p_hash is None:
                 p_hash = f"ERROR_{uuid.uuid4().hex}"
-            db_conn.execute("UPDATE files SET partial_hash = ? WHERE filepath = ?", (p_hash, path))
-            if idx % 100 == 0 or idx == len(to_partial) - 1:
-                db_conn.commit()
+            return path, p_hash
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_partial_task, path) for path in to_partial]
+            for future in as_completed(futures):
+                path, p_hash = future.result()
+                batch_updates.append((p_hash, path))
+                completed_count += 1
+                if len(batch_updates) >= 200 or completed_count == len(to_partial):
+                    db_conn.executemany("UPDATE files SET partial_hash = ? WHERE filepath = ?", batch_updates)
+                    db_conn.commit()
+                    batch_updates = []
+
                 if progress_cb:
-                    progress_cb('partial_progress', idx + 1, len(to_partial))
+                    progress_cb('partial_progress', completed_count, len(to_partial))
                 elif not run_quiet:
-                    print_progress(idx + 1, len(to_partial), prefix="Partial Hashing", suffix=f"{idx+1}/{len(to_partial)}")
+                    if completed_count % 100 == 0 or completed_count == len(to_partial):
+                        print_progress(completed_count, len(to_partial), prefix="Partial Hashing", suffix=f"{completed_count}/{len(to_partial)}")
+
         if not run_quiet and not progress_cb:
             print()
-    
+
     # Step 2: Compute full hashes for duplicates
     cursor.execute("""
         SELECT filepath, size FROM files 
@@ -415,31 +435,42 @@ def find_duplicates(db_path, progress_cb=None, run_quiet=False, throttle_sleep=0
     to_full_rows = cursor.fetchall()
     to_full = [r[0] for r in to_full_rows]
     total_bytes_to_hash = sum(r[1] for r in to_full_rows)
-    
+
     if to_full:
         if progress_cb:
             progress_cb('full_start', len(to_full), total_bytes_to_hash)
         elif not run_quiet:
             print(f"{Colors.BLUE}Computing full hashes for {len(to_full):,} candidate files ({format_size(total_bytes_to_hash)})...{Colors.END}")
-            
-        for idx, path in enumerate(to_full):
-            # Pass chunk handler to progress callback
-            def make_chunk_cb():
-                return lambda sz: progress_cb('hash_chunk', sz) if progress_cb else None
-                
-            f_hash = compute_full_hash(path, chunk_cb=make_chunk_cb(), throttle_sleep=throttle_sleep)
+
+        completed_count = 0
+        batch_updates = []
+
+        def _full_task(path):
+            chunk_cb = (lambda sz: progress_cb('hash_chunk', sz)) if progress_cb else None
+            f_hash = compute_full_hash(path, chunk_cb=chunk_cb, throttle_sleep=throttle_sleep)
             if f_hash is None:
                 f_hash = f"ERROR_{uuid.uuid4().hex}"
-            db_conn.execute("UPDATE files SET full_hash = ? WHERE filepath = ?", (f_hash, path))
-            if idx % 10 == 0 or idx == len(to_full) - 1:
-                db_conn.commit()
+            return path, f_hash
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_full_task, path) for path in to_full]
+            for future in as_completed(futures):
+                path, f_hash = future.result()
+                batch_updates.append((f_hash, path))
+                completed_count += 1
+                if len(batch_updates) >= 50 or completed_count == len(to_full):
+                    db_conn.executemany("UPDATE files SET full_hash = ? WHERE filepath = ?", batch_updates)
+                    db_conn.commit()
+                    batch_updates = []
+
                 if progress_cb:
-                    progress_cb('full_progress', idx + 1, len(to_full))
+                    progress_cb('full_progress', completed_count, len(to_full))
                 elif not run_quiet:
-                    print_progress(idx + 1, len(to_full), prefix="Full Hashing   ", suffix=f"{idx+1}/{len(to_full)}")
+                    if completed_count % 10 == 0 or completed_count == len(to_full):
+                        print_progress(completed_count, len(to_full), prefix="Full Hashing   ", suffix=f"{completed_count}/{len(to_full)}")
+
         if not run_quiet and not progress_cb:
             print()
-        db_conn.commit()
 
     # Step 3: Extract final duplicate groups
     cursor.execute("""
@@ -1069,10 +1100,12 @@ def launch_gui():
             
             start_ang = 0
             for ang, col in zip(angles, colors):
-                if ang > 0:
-                    # Tkinter create_arc glithes if extent is 360; cap single full slice at 359.99
-                    draw_extent = min(ang, 359.99)
-                    self.chart_canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=start_ang, extent=draw_extent, fill=col, outline="")
+                if ang >= 359.9:
+                    # Full circle: draw oval directly to avoid Tkinter create_arc 360-degree rendering glitches
+                    self.chart_canvas.create_oval(cx-r, cy-r, cx+r, cy+r, fill=col, outline="")
+                    break
+                elif ang > 0:
+                    self.chart_canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=start_ang, extent=ang, fill=col, outline="")
                     start_ang += ang
             
             r_inner = 48
@@ -1088,7 +1121,20 @@ def launch_gui():
             self.root.after(1500, self.update_ram_usage)
 
         def get_progress_cb(self):
+            last_event_times = {}
+            cb_lock = threading.Lock()
+
             def cb(action, *args):
+                now = time.time()
+                # 10 Hz throttling for high-frequency progress events
+                if action in ('progress_update', 'partial_progress', 'full_progress', 'hash_chunk'):
+                    with cb_lock:
+                        if action in last_event_times and (now - last_event_times[action]) < 0.1:
+                            if action == 'hash_chunk':
+                                self.hash_bytes_processed += args[0]
+                            return
+                        last_event_times[action] = now
+
                 if action == 'error':
                     self.queue.put(('log', f"[ERROR] {args[0]}\n", 'error'))
                     self.queue.put(('status', "Error occurred"))
